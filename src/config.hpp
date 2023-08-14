@@ -38,12 +38,14 @@ private:
 public:
     static Config* config_s;
     uint64_t duration = 100; //duration in seconds;
+    uint16_t burst_size;
+    uint16_t pkt_len;
     std::string host_name_;
     std::string name_;
     std::vector<NetworkInfo> net_info_;
     std::string dpdk_options_;
     std::vector<uint16_t> target_ids_;
-   
+    uint16_t src_id_;
     CpuInfo cpu_info_;
 
     
@@ -75,6 +77,8 @@ public:
     std::vector<Config::NetworkInfo> get_net_info() const {
         return net_info_;
     }
+
+    
    
     
 };

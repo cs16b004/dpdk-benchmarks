@@ -37,45 +37,46 @@ int Dpdk::dpdk_rx_loop(void* arg) {
       
 int Dpdk::dpdk_tx_loop(void* arg) {
    dpdk_thread_info* info = (dpdk_thread_info*) arg ;
-   log_info("Launching tx thread %d, on lcore: %d, id counter %d",info->thread_id_, rte_lcore_id(),info->id_counter_);
+   
+   uint16_t burst_size = Config::get_config()->burst_size;
+   const uint16_t offset = sizeof(rte_ether_hdr) + sizeof(ipv4_hdr_t) + sizeof(udp_hdr_t);
+   uint16_t port_id = info->port_id_;
+   uint16_t queue_id = info->queue_id_;
+
+   rte_mbuf** mbuf_arr = info->buf;
+   int ret;
+    log_info("Launching tx thread %d, on lcore: %d, id counter %d, burst_size %d",info->thread_id_, rte_lcore_id(),info->id_counter_,burst_size);
     while(!info->dpdk_th->force_quit){
-        ;
+        
+        rte_prefetch0(mbuf_arr);
+        for(int i=0;i<burst_size;i++){
+
+            uint8_t* pkt_buf = rte_pktmbuf_mtod(mbuf_arr[i], uint8_t*);
+            rte_ether_hdr* eth_hdr = reinterpret_cast<rte_ether_hdr*>(pkt_buf);
+            
+            log_info("Packet id %lld for mc %s",info->id_counter_,mac_to_string(&(eth_hdr->d_addr)).c_str());
+            pkt_buf = rte_pktmbuf_mtod(mbuf_arr[i], uint8_t*);
+            rte_memcpy(pkt_buf + offset, &(info->id_counter_), sizeof(uint64_t));
+            info->id_counter_++;
+        ret = rte_eth_tx_burst(port_id,queue_id,mbuf_arr,burst_size);
+        if (unlikely(ret <= 0))
+            log_error("Tx couldn't send\n");   
+        }
+        info->snd_count_+=ret;
+
+        rte_prefetch0(mbuf_arr);
     }
+    log_info("Thread %d sent %d pkts", info->thread_id_ ,info->snd_count_);
    return 0;
 
 }
-void Dpdk::send(uint8_t* payload, unsigned length,
-                      int server_id, int client_id) {
-    
-}
 
-int Dpdk::make_pkt_header(uint8_t *pkt, int payload_len,
-                                int src_id, int dest_id, int port_offset) {
-    // NetAddress& src_addr = src_addr_[src_id];
-    // NetAddress& dest_addr = dest_addr_[dest_id];
-
-     unsigned pkt_offset = 0;
-    // eth_hdr_t* eth_hdr = reinterpret_cast<eth_hdr_t*>(pkt);
-    // gen_eth_header(eth_hdr, src_addr.mac, dest_addr.mac);
-
-    // pkt_offset += sizeof(eth_hdr_t);
-    // ipv4_hdr_t* ipv4_hdr = reinterpret_cast<ipv4_hdr_t*>(pkt + pkt_offset);
-    // gen_ipv4_header(ipv4_hdr, src_addr.ip, dest_addr.ip, payload_len);
-
-    // pkt_offset += sizeof(ipv4_hdr_t);
-    // udp_hdr_t* udp_hdr = reinterpret_cast<udp_hdr_t*>(pkt + pkt_offset);
-    // int client_port_addr = src_addr.port + port_offset;
-    // gen_udp_header(udp_hdr, client_port_addr, dest_addr.port, payload_len);
-
-    // pkt_offset += sizeof(udp_hdr_t);
-    return pkt_offset;
-}
 
 void Dpdk::init(Config* config) {
     
     config_ = config;
     
-    addr_config(config->host_name_, config->get_net_info());
+    addr_config(config->get_net_info());
 
     Config::CpuInfo cpu_info = config->get_cpu_info();
     const char* argv_str = config->get_dpdk_options();
@@ -177,28 +178,13 @@ void Dpdk::init_dpdk_main_thread(const char* argv_str) {
     
 }
 
-void Dpdk::addr_config(std::string host_name,
-                       std::vector<Config::NetworkInfo> net_info) {
-    // for (auto& net : net_info) {
-    //     std::map<int, NetAddress>* addr;
-    //     if (host_name == net.name)
-    //         addr = &src_addr_;
-    //     else
-    //         addr = &dest_addr_;
-
-    //     /* if (net.type == host_type) */
-    //     /*     addr = &src_addr_; */
-    //     /* else */
-    //     /*     addr = &dest_addr_; */
-
-    //     auto it = addr->find(net.id);
-    //     assert(it == addr->end());
-    //     addr->emplace(std::piecewise_construct,
-    //                   std::forward_as_tuple(net.id),
-    //                   std::forward_as_tuple(net.mac.c_str(),
-    //                                         net.ip.c_str(),
-    //                                         net.port));
-    // }
+void Dpdk::addr_config(std::vector<Config::NetworkInfo> net_info) {
+    for (auto& net : net_info) {
+        NetAddress n_addr = NetAddress(net.mac.c_str(),net.ip.c_str(),net.port);
+        n_addr.id = net.id;
+        addr_vec_.push_back(n_addr);
+    
+    }
 }
 
 int Dpdk::port_init(uint16_t port_id) {
@@ -283,12 +269,14 @@ int Dpdk::port_init(uint16_t port_id) {
        thread_rx_info[i] = new dpdk_thread_info();
         log_debug("Create rx thread %d info on port %d and queue %d",i, port_id, i);
        thread_rx_info[i]->init(this, i, port_id, i, 0);
+       thread_rx_info[i]->buf_alloc(rx_mbuf_pool[i]);
     }
 
     for (int i = 0; i < tx_threads_; i++) {
         thread_tx_info[i] = new dpdk_thread_info();
         log_debug("Create tx thread %d info on port %d and queue %d, id_counter: %d",i, port_id, i,i*DPDK_COUNTER_DIFF);
         thread_tx_info[i]->init(this, i, port_id, i, i*DPDK_COUNTER_DIFF);
+        thread_tx_info[i]->buf_alloc(tx_mbuf_pool[i]);
     }
 
     return 0;
@@ -357,7 +345,7 @@ void Dpdk::register_resp_callback() {
     response_handler = [&](uint8_t* data, int data_len,
                           int server_id, int client_id) -> int {
         log_debug("client %d got xid %ld", client_id, *reinterpret_cast<uint64_t*>(data));
-        this->send(data, data_len, server_id, client_id);
+
         return data_len;
     };
 }
@@ -370,8 +358,47 @@ void Dpdk::register_resp_callback() {
 
 
 int Dpdk::dpdk_thread_info::buf_alloc(struct rte_mempool* mbuf_pool) {
-    int retval = rte_pktmbuf_alloc_bulk(mbuf_pool, buf, 1024);
+    buf = new rte_mbuf*[Config::get_config()->burst_size];
+    int retval = rte_pktmbuf_alloc_bulk(mbuf_pool, buf, Config::get_config()->burst_size);
     return retval;
+}
+
+void Dpdk::dpdk_thread_info::make_headers(){
+    for(int i=0;i<Config::get_config()->burst_size;i++){
+        make_pkt_header(buf[i]);
+    }
+}
+
+void Dpdk::dpdk_thread_info::make_pkt_header(struct rte_mbuf* pkt){
+    Config* conf = Config::get_config();
+    uint16_t pkt_offset=0;
+   
+     pkt->data_len = conf->pkt_len;
+    pkt->next = NULL;
+    pkt->ol_flags = PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
+    /* Initialize Ethernet header. */
+    
+    NetAddress src_addr = dpdk_th->get_net_from_id(conf->src_id_);
+    NetAddress dest_addr = dpdk_th->get_net_from_id(conf->target_ids_[0]);
+    rte_ether_hdr* eth_hdr = reinterpret_cast<rte_ether_hdr*>(pkt);
+    gen_eth_header(eth_hdr, src_addr.mac, dest_addr.mac);
+
+    pkt_offset += sizeof(rte_ether_hdr);
+    rte_ipv4_hdr* ipv4_hdr = reinterpret_cast<rte_ipv4_hdr*>(pkt + pkt_offset);
+    gen_ipv4_header(ipv4_hdr, src_addr.ip, (dest_addr.ip),conf->pkt_len);
+
+    pkt_offset += sizeof(ipv4_hdr_t);
+    rte_udp_hdr* udp_hdr = reinterpret_cast<rte_udp_hdr*>(pkt + pkt_offset);
+   
+    gen_udp_header(udp_hdr, src_addr.port, dest_addr.port , conf->pkt_len);
+
+    pkt_offset += sizeof(udp_hdr_t);
+    pkt->pkt_len = pkt_offset + conf->pkt_len;
+    pkt->l2_len = sizeof(struct rte_ether_hdr);
+    pkt->l3_len = sizeof(struct rte_ipv4_hdr);
+    pkt->l4_len = sizeof(struct rte_udp_hdr);
+    pkt->nb_segs = 1;
+
 }
 
 void Dpdk::NetAddress::init(const char* mac_i, const char* ip_i, const int port_i) {

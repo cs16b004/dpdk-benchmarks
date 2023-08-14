@@ -24,12 +24,11 @@ private:
     std::function<int(uint8_t*, int, int, int)> response_handler;
     std::thread main_thread;
     bool force_quit{false};
-
+    std::vector<NetAddress> addr_vec_;
     Config* config_;
 
 private:
-    void addr_config(std::string host_name,
-                     std::vector<Config::NetworkInfo> net_info);
+    void addr_config(std::vector<Config::NetworkInfo> net_info);
     void init_dpdk_main_thread(const char* argv_str);
     void init_dpdk_echo(const char* argv_str);
 
@@ -43,11 +42,21 @@ private:
 
     int make_pkt_header(uint8_t *pkt, int payload_len,
                         int src_id, int dest_id, int port_offset);
+    NetAddress get_net_from_id(uint16_t id_){
+        for(auto ni:addr_vec_){
+
+            if(ni.id == id_){
+                log_debug("Found net info with ID %d",id_);
+                return ni;
+            }
+        }
+        return addr_vec_[0];
+    }                    
 
 
 public:
     void init(Config* config);
-    void send(uint8_t* payload, unsigned length, int server_id, int client_id);
+
     void shutdown();
     void trigger_shutdown();
 
@@ -86,6 +95,7 @@ private:
         uint64_t rcv_count_ = 0; /*Packet received each thread will count and merge will happen at time of reporting to avoid locking*/
         uint64_t id_counter_; 
         
+        uint64_t snd_count_=0;
         
         int udp_port = 0; /*UDP port num form config*/
         struct rte_mbuf **buf{nullptr}; /* mbufs array*/
@@ -95,7 +105,8 @@ private:
         void init(Dpdk* th, uint16_t th_id, uint8_t p_id,
                   uint16_t q_id, uint64_t id_conter);
         int buf_alloc(struct rte_mempool* mbuf_pool);
-
+        void make_headers();
+        void make_pkt_header(struct rte_mbuf* pkt);
         ~dpdk_thread_info() {
             if (buf)
                 delete [] buf;

@@ -93,6 +93,8 @@ void Config::load_dpdk_yml(YAML::Node config) {
     dpdk_options_ = config["option"].as<std::string>();
     num_rx_threads_ = config["rx_threads"].as<uint16_t>();
     num_tx_threads_ = config["tx_threads"].as<uint16_t>();
+    pkt_len = config["pkt_size"].as<uint16_t>();
+    burst_size = config["pkt_burst_size"].as<uint16_t>();
 }
 
 void Config::load_cpu_yml(YAML::Node config) {
@@ -104,6 +106,7 @@ void Config::load_cpu_yml(YAML::Node config) {
 void Config::load_host_yml(YAML::Node config) {
     host_name_ = config["name"].as<std::string>();
     std::string type = config["type"].as<std::string>();
+    src_id_ = config["id"].as<uint16_t>();
     if(type == "generator"){
         host_type_ = GENERATOR;
         target_ids_ = config["target"].as<std::vector<uint16_t>>();

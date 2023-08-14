@@ -2,4 +2,4 @@ host:
   name: catskill
   type: generator
   id: 4
-  target: [2,4]
+  target: [2]
