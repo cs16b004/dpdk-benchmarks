@@ -19,13 +19,16 @@ int Config::create_config(int argc, char** argv) {
 
     int c;
     std::string filename;
-    while ((c = getopt(argc, argv, "f:")) != -1) {
+    while ((c = getopt(argc, argv, "f:d:")) != -1) {
         switch(c) {
         case 'f':
             filename = std::string(optarg);
             config_s->config_paths_.push_back(filename);
             break;
-
+        case 'd':{
+            config_s->duration = atoi(optarg);
+            break;
+        }
         case '?':
             assert(0);
             break;
@@ -49,11 +52,11 @@ void Config::load_cfg_files() {
     }
 
     assert(cpu_info_.core_per_numa > 1);
-    cpu_info_.compute_maxs(dpdk_rxtx_threads_ratio_);
+    
 }
 
 void Config::load_yml(std::string& filename) {
-    log_info("Loading configuration from : %s",filename.c_str());
+    log_info("Loading configuration from :%s",filename.c_str());
     YAML::Node config = YAML::LoadFile(filename);
 
     if (config["network"])
@@ -67,9 +70,6 @@ void Config::load_yml(std::string& filename) {
 
     if (config["cpu"])
         load_cpu_yml(config["cpu"]);
-
-    if (config["server"])
-        load_server_yml(config["server"]);
 }
 
 void Config::load_network_yml(YAML::Node config) {
@@ -91,7 +91,8 @@ void Config::load_network_yml(YAML::Node config) {
 
 void Config::load_dpdk_yml(YAML::Node config) {
     dpdk_options_ = config["option"].as<std::string>();
-    dpdk_rxtx_threads_ratio_ = config["rxtx_thread"].as<float>();
+    num_rx_threads_ = config["rx_threads"].as<uint16_t>();
+    num_tx_threads_ = config["tx_threads"].as<uint16_t>();
 }
 
 void Config::load_cpu_yml(YAML::Node config) {
@@ -102,12 +103,19 @@ void Config::load_cpu_yml(YAML::Node config) {
 
 void Config::load_host_yml(YAML::Node config) {
     host_name_ = config["name"].as<std::string>();
+    std::string type = config["type"].as<std::string>();
+    if(type == "generator"){
+        host_type_ = GENERATOR;
+        target_ids_ = config["target"].as<std::vector<uint16_t>>();
+        assert(target_ids_.size() > 0);
+    }else{
+        host_type_ = SERVER;
+       
+    }
+
 }
 
-void Config::load_server_yml(YAML::Node config) {
-    default_server_ = config["default_server"].as<int>();
-    server_update_path_ = config["update_path"].as<std::string>();
-}
+
 
 
 

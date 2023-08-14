@@ -19,13 +19,13 @@ private:
     uint16_t rx_queue_ = 1, tx_queue_ = 1;
     struct rte_mempool **tx_mbuf_pool;
     struct rte_mempool **rx_mbuf_pool;
-    struct dpdk_thread_info *thread_rx_info{nullptr};
-    struct dpdk_thread_info *thread_tx_info{nullptr};
-    std::map<int, NetAddress> src_addr_;
-    std::map<int, NetAddress> dest_addr_;
+    struct dpdk_thread_info **thread_rx_info{nullptr};
+    struct dpdk_thread_info **thread_tx_info{nullptr};
     std::function<int(uint8_t*, int, int, int)> response_handler;
     std::thread main_thread;
     bool force_quit{false};
+
+    Config* config_;
 
 private:
     void addr_config(std::string host_name,
@@ -38,6 +38,7 @@ private:
     int port_close(uint16_t port_id);
 
     static int dpdk_rx_loop(void* arg);
+    static int dpdk_tx_loop(void* arg);
     void process_incoming_packets(dpdk_thread_info* rx_buf_info);
 
     int make_pkt_header(uint8_t *pkt, int payload_len,
@@ -78,36 +79,21 @@ private:
         bool operator==(const NetAddress& other);
         NetAddress& operator=(const NetAddress& other);
     };
-
-    struct packet_stats {
-        uint64_t pkt_count = 0;
-
-        std::map<int, uint64_t> pkt_port_dest;
-
-        uint64_t pkt_error = 0;
-        uint64_t pkt_eth_type_err = 0;
-        uint64_t pkt_ip_prot_err = 0;
-        uint64_t pkt_port_num_err = 0;
-        uint64_t pkt_app_err = 0;
-
-        void merge(packet_stats& other);
-        void show_statistics();
-    };
-
     struct dpdk_thread_info {
-        int thread_id;
-        int port_id;
-        int queue_id;
-        int count = 0;
-        int max_size;
-        packet_stats stat;
-        int udp_port_id = 0;
-        struct rte_mbuf **buf{nullptr};
-        Dpdk* dpdk_th;
+        uint16_t thread_id_; /* Thread ID from 0 to num_rx_threads_ - 1  or num_tx_threads_ -1 */
+        uint8_t port_id_; /*ETHER port ID  0 to num_ports_ -1 */
+        uint16_t queue_id_; /*Ether Queue ID (Better Parallelism)  each rx/tx thread has its own queue so same as thread_id */
+        uint64_t rcv_count_ = 0; /*Packet received each thread will count and merge will happen at time of reporting to avoid locking*/
+        uint64_t id_counter_; 
+        
+        
+        int udp_port = 0; /*UDP port num form config*/
+        struct rte_mbuf **buf{nullptr}; /* mbufs array*/
+        Dpdk* dpdk_th; 
 
         dpdk_thread_info() { }
-        void init(Dpdk* th, int th_id, int p_id,
-                  int q_id, int burst_size);
+        void init(Dpdk* th, uint16_t th_id, uint8_t p_id,
+                  uint16_t q_id, uint64_t id_conter);
         int buf_alloc(struct rte_mempool* mbuf_pool);
 
         ~dpdk_thread_info() {

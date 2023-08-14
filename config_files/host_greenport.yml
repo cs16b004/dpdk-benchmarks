@@ -1,2 +1,5 @@
 host:
   name: greenport
+  type: generator
+  id: 5
+  target: [4]

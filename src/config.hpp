@@ -30,17 +30,6 @@ public:
         int core_per_numa;
         int max_rx_threads;
         int max_tx_threads;
-
-        void compute_maxs(float rxtx_ratio) {
-            float total_cores = (float) numa * (float) core_per_numa;
-            float total_ratio = rxtx_ratio + 1.0;
-            max_tx_threads = (int) (total_cores / total_ratio);
-            max_rx_threads = (int) ((rxtx_ratio * total_cores) / total_ratio);
-
-            assert(max_rx_threads + max_tx_threads <= (int) total_cores);
-            log_debug("max tx threads %d, max rx threads %d",
-                      max_tx_threads, max_rx_threads);
-        }
     };
 
 private:
@@ -48,25 +37,28 @@ private:
    
 public:
     static Config* config_s;
-
+    uint64_t duration = 100; //duration in seconds;
     std::string host_name_;
     std::string name_;
     std::vector<NetworkInfo> net_info_;
     std::string dpdk_options_;
+    std::vector<uint16_t> target_ids_;
+   
     CpuInfo cpu_info_;
+
     
     uint16_t num_tx_threads_;
     uint16_t num_rx_threads_;
-  
+    enum{ GENERATOR, SERVER} host_type_;
 
 private:
+
     void load_cfg_files();
     void load_yml(std::string& filename);
     void load_network_yml(YAML::Node config);
     void load_dpdk_yml(YAML::Node config);
     void load_cpu_yml(YAML::Node config);
     void load_host_yml(YAML::Node config);
-    void load_server_yml(YAML::Node config);
  
    // void load_partition_type(YAML::Node config);
 
@@ -83,29 +75,7 @@ public:
     std::vector<Config::NetworkInfo> get_net_info() const {
         return net_info_;
     }
-    int get_host_threads() const {
-        return host_threads_;
-    }
-    int get_default_server() const {
-        return default_server_;
-    }
-    const char* get_server_update_path() const {
-        if (server_update_path_.empty())
-            return nullptr;
-        else
-            return server_update_path_.c_str();
-    }
-    float get_dpdk_rxtx_thread_ratio() const {
-        return dpdk_rxtx_threads_ratio_;
-    }
-    int get_transport() const {
-        return transport_;
-    }
-    int get_workload() const {
-        return workload_;
-    }
-    int get_ratio() const {
-        return ratio_;
-    }
+   
+    
 };
 #endif

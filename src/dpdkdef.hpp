@@ -14,26 +14,27 @@
 #include <unistd.h>
 #include <sstream>
 #include <string>
-
+#define n_likely(x)       __builtin_expect((x),1)
+#define n_unlikely(x)     __builtin_expect((x),0)
 static constexpr uint16_t EtherTypeIP = 0x800;
 static constexpr uint16_t IPProtUDP = 0x11;
 
 /// Check a condition at runtime. If the condition is false, throw exception.
 static inline void rt_assert(bool condition, std::string throw_str, char* s) {
-  if (unlikely(!condition)) {
+  if (n_unlikely(!condition)) {
     throw std::runtime_error(throw_str + std::string(s));
   }
 }
 
 /// Check a condition at runtime. If the condition is false, throw exception.
 static inline void rt_assert(bool condition, std::string throw_str) {
-  if (unlikely(!condition)) throw std::runtime_error(throw_str);
+  if (n_unlikely(!condition)) throw std::runtime_error(throw_str);
 }
 
 /// Check a condition at runtime. If the condition is false, throw exception.
 /// This is faster than rt_assert(cond, str) as it avoids string construction.
 static inline void rt_assert(bool condition) {
-  if (unlikely(!condition)) throw std::runtime_error("Error");
+  if (n_unlikely(!condition)) throw std::runtime_error("Error");
 }
 
 /// Convert a MAC string like "9c:dc:71:5b:32:90" to an array of bytes

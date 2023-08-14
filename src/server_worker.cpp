@@ -23,13 +23,14 @@ void Server::run_open_client(int client_id) {
 }
 
 void Server::check_server_id() {
-    current_server = config->get_default_server();
+    //current_server = config->get_default_server();
 
    
 }
 
 void Server::shutdown() {
-   
+   sleep(Config::get_config()->duration);
+   trigger_shutdown();
 }
 
 void Server::trigger_shutdown() {
