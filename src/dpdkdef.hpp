@@ -67,6 +67,7 @@ static std::string mac_to_string(struct rte_ether_addr *mac) {
             mac->addr_bytes[0], mac->addr_bytes[1], mac->addr_bytes[2],
             mac->addr_bytes[3], mac->addr_bytes[4], mac->addr_bytes[5]);
           return std::string(mac_str);
+
 }
 static uint32_t ipv4_from_str(const char* ip) {
   uint32_t addr;

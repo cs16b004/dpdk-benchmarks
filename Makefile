@@ -23,7 +23,7 @@ all: release
 new: clean $(EXECUTABLE)
 
 debug: CFLAGS += -g3 $(NO_OPT) -DLOG_LEVEL_AS_DEBUG
-debug: $(EXECUTABLE)
+debug: clean $(EXECUTABLE)
 
 release: CFLAGS += $(OPT)
 release: $(EXECUTABLE)

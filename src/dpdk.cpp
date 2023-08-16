@@ -25,6 +25,10 @@
 
 #define DPDK_COUNTER_DIFF 3*1000*1000
 
+const uint16_t DATA_OFFSET = sizeof(struct rte_ether_hdr) + sizeof(struct ipv4_hdr_t) + sizeof(struct udp_hdr_t);
+const uint16_t IPV4_OFFSET =  sizeof(struct rte_ether_hdr);
+const uint16_t UDP_OFFSET = sizeof(struct rte_ether_hdr) + sizeof(struct ipv4_hdr_t);
+
 int Dpdk::dpdk_rx_loop(void* arg) {
    dpdk_thread_info* info = (dpdk_thread_info*) arg ;
    log_info("Launching rx thread %d, on lcore: %d, id counter %d",info->thread_id_, rte_lcore_id(),info->id_counter_);
@@ -39,32 +43,33 @@ int Dpdk::dpdk_tx_loop(void* arg) {
    dpdk_thread_info* info = (dpdk_thread_info*) arg ;
    
    uint16_t burst_size = Config::get_config()->burst_size;
-   const uint16_t offset = sizeof(rte_ether_hdr) + sizeof(ipv4_hdr_t) + sizeof(udp_hdr_t);
-   uint16_t port_id = info->port_id_;
-   uint16_t queue_id = info->queue_id_;
+   
 
-   rte_mbuf** mbuf_arr = info->buf;
+   info->make_headers();
    int ret;
     log_info("Launching tx thread %d, on lcore: %d, id counter %d, burst_size %d",info->thread_id_, rte_lcore_id(),info->id_counter_,burst_size);
     while(!info->dpdk_th->force_quit){
         
-        rte_prefetch0(mbuf_arr);
+        rte_prefetch0(info->buf);
         for(int i=0;i<burst_size;i++){
 
-            uint8_t* pkt_buf = rte_pktmbuf_mtod(mbuf_arr[i], uint8_t*);
-            rte_ether_hdr* eth_hdr = reinterpret_cast<rte_ether_hdr*>(pkt_buf);
+
+            rte_ether_hdr* eth_hdr = reinterpret_cast<rte_ether_hdr*>(info->buf[i]);
             
-            log_info("Packet id %lld for mc %s",info->id_counter_,mac_to_string(&(eth_hdr->d_addr)).c_str());
-            pkt_buf = rte_pktmbuf_mtod(mbuf_arr[i], uint8_t*);
-            rte_memcpy(pkt_buf + offset, &(info->id_counter_), sizeof(uint64_t));
+            log_debug("Packet id %lld is mac: %s",info->id_counter_,mac_to_string((eth_hdr->d_addr).addr_bytes).c_str());
+        
+            //rte_memcpy(info->buf[i] + DATA_OFFSET, &(info->id_counter_), sizeof(uint64_t));
             info->id_counter_++;
-        ret = rte_eth_tx_burst(port_id,queue_id,mbuf_arr,burst_size);
+        }
+        log_debug("PKt Address while sending %p",&(info->buf[0]));
+        ret = rte_eth_tx_burst(info->port_id_,info->queue_id_,info->buf,Config::get_config()->burst_size);
         if (unlikely(ret <= 0))
             log_error("Tx couldn't send\n");   
-        }
+       
         info->snd_count_+=ret;
 
-        rte_prefetch0(mbuf_arr);
+        rte_prefetch0(info->buf);
+        break;
     }
     log_info("Thread %d sent %d pkts", info->thread_id_ ,info->snd_count_);
    return 0;
@@ -153,12 +158,18 @@ void Dpdk::init_dpdk_main_thread(const char* argv_str) {
     log_info("DPDK tx threads %d, rx threads %d", tx_threads_, rx_threads_);
 
     uint16_t total_lcores = rte_lcore_count();
+ 
     log_info("Total Cores available: %d",total_lcores);
     uint16_t rx_lcore_lim = (config_->host_type_ == Config::GENERATOR)? (rx_threads_+tx_threads_)/2: rx_threads_;
     uint16_t tx_lcore_lim = (config_->host_type_ == Config::GENERATOR) ? rx_threads_ + tx_threads_: 0;
-    uint16_t lcore = 0;
+
+    uint8_t numa_id =  rte_eth_dev_socket_id(port_num_-1);
+    // Add core per numa so that threads are scheduled on rigt lcores
+    uint16_t lcore;
+    rx_lcore_lim += numa_id * Config::get_config()->cpu_info_.core_per_numa;
+    tx_lcore_lim += numa_id * Config::get_config()->cpu_info_.core_per_numa;
     log_info("rx_core limit: %d tx_core limit: %d",rx_lcore_lim,tx_lcore_lim);
-    for (lcore = 1; lcore < rx_lcore_lim+1; lcore++) {
+    for (lcore = numa_id * Config::get_config()->cpu_info_.core_per_numa + 1; lcore < rx_lcore_lim+1; lcore++) {
             
             int retval = rte_eal_remote_launch(dpdk_rx_loop, this->thread_rx_info[lcore%rx_threads_], lcore );
             if (retval < 0)
@@ -218,6 +229,29 @@ int Dpdk::port_init(uint16_t port_id) {
     memset(&txconf, 0x0, sizeof(struct rte_eth_txconf));
     memset(&rxconf, 0x0, sizeof(struct rte_eth_rxconf));
 
+
+     port_conf = {
+		.rxmode = {
+			.split_hdr_size = 0,
+		},
+		.txmode = {
+			.offloads =
+				DEV_TX_OFFLOAD_VLAN_INSERT |
+				DEV_TX_OFFLOAD_IPV4_CKSUM  |
+				DEV_TX_OFFLOAD_UDP_CKSUM   |
+				DEV_TX_OFFLOAD_TCP_CKSUM   |
+				DEV_TX_OFFLOAD_SCTP_CKSUM  |
+				DEV_TX_OFFLOAD_TCP_TSO,
+		},
+	};
+    
+    port_conf.txmode.offloads &= dev_info.tx_offload_capa;
+
+    rxconf = dev_info.default_rxconf;
+	rxconf.offloads = port_conf.rxmode.offloads;
+   
+
+
     retval = rte_eth_dev_configure(port_id, rx_queue_, tx_queue_, &port_conf);
     if (retval != 0) {
         log_error("Error during device configuration (port %u) info: %s",
@@ -234,7 +268,7 @@ int Dpdk::port_init(uint16_t port_id) {
 
     rxconf.rx_thresh.wthresh = DPDK_RX_WRITEBACK_THRESH;
     for (q = 0; q < rx_queue_; q++) {
-        int pool_idx = port_id * rx_queue_ + q;
+        int pool_idx =  q;
         retval = rte_eth_rx_queue_setup(port_id, q, nb_rxd,
                                         rte_eth_dev_socket_id(port_id),
                                         &rxconf, rx_mbuf_pool[pool_idx]);
@@ -246,8 +280,7 @@ int Dpdk::port_init(uint16_t port_id) {
     }
 
     for (q = 0; q < tx_queue_; q++) {
-        /* TODO: Maybe we should set the type of queue in QDMA
-         * to be stream/memory mapped */
+
         retval = rte_eth_tx_queue_setup(port_id, q, nb_txd,
                                         rte_eth_dev_socket_id(port_id),
                                         &txconf);
@@ -358,13 +391,14 @@ void Dpdk::register_resp_callback() {
 
 
 int Dpdk::dpdk_thread_info::buf_alloc(struct rte_mempool* mbuf_pool) {
-    buf = new rte_mbuf*[Config::get_config()->burst_size];
+    
     int retval = rte_pktmbuf_alloc_bulk(mbuf_pool, buf, Config::get_config()->burst_size);
     return retval;
 }
 
 void Dpdk::dpdk_thread_info::make_headers(){
     for(int i=0;i<Config::get_config()->burst_size;i++){
+        log_debug("Packet address for pkt %d while making header: %p",i,&buf[i]);
         make_pkt_header(buf[i]);
     }
 }
@@ -377,18 +411,22 @@ void Dpdk::dpdk_thread_info::make_pkt_header(struct rte_mbuf* pkt){
     pkt->next = NULL;
     pkt->ol_flags = PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
     /* Initialize Ethernet header. */
-    
+     uint8_t* pkt_buf = rte_pktmbuf_mtod(pkt, uint8_t*);
+
     NetAddress src_addr = dpdk_th->get_net_from_id(conf->src_id_);
     NetAddress dest_addr = dpdk_th->get_net_from_id(conf->target_ids_[0]);
-    rte_ether_hdr* eth_hdr = reinterpret_cast<rte_ether_hdr*>(pkt);
+   
+    rte_ether_hdr* eth_hdr = reinterpret_cast<rte_ether_hdr*>(pkt_buf);
     gen_eth_header(eth_hdr, src_addr.mac, dest_addr.mac);
 
+    log_debug("Making pkt ether addr %s at address %p",mac_to_string(eth_hdr->d_addr.addr_bytes).c_str(), eth_hdr);
+
     pkt_offset += sizeof(rte_ether_hdr);
-    rte_ipv4_hdr* ipv4_hdr = reinterpret_cast<rte_ipv4_hdr*>(pkt + pkt_offset);
+    rte_ipv4_hdr* ipv4_hdr = reinterpret_cast<rte_ipv4_hdr*>(pkt_buf + pkt_offset);
     gen_ipv4_header(ipv4_hdr, src_addr.ip, (dest_addr.ip),conf->pkt_len);
 
     pkt_offset += sizeof(ipv4_hdr_t);
-    rte_udp_hdr* udp_hdr = reinterpret_cast<rte_udp_hdr*>(pkt + pkt_offset);
+    rte_udp_hdr* udp_hdr = reinterpret_cast<rte_udp_hdr*>(pkt_buf + pkt_offset);
    
     gen_udp_header(udp_hdr, src_addr.port, dest_addr.port , conf->pkt_len);
 
@@ -448,5 +486,6 @@ void Dpdk::dpdk_thread_info::init(Dpdk* th, uint16_t th_id, uint8_t p_id,
                     this->port_id_ = p_id;
                     this->queue_id_ =q_id;
                     this->id_counter_ = id_counter;
+                    buf = new struct rte_mbuf*[Config::get_config()->burst_size];
 
                   }
