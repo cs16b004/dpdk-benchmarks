@@ -11,7 +11,7 @@ private:
     struct packet_stats;
     struct dpdk_thread_info;
    
-
+    uint8_t* data_arr;
 private:
     int port_num_ = 0;
     int tx_threads_ = 0;
@@ -21,6 +21,7 @@ private:
     struct rte_mempool **rx_mbuf_pool;
     struct dpdk_thread_info **thread_rx_info{nullptr};
     struct dpdk_thread_info **thread_tx_info{nullptr};
+    struct dpdk_thread_info *thread_stat_info; 
     std::function<int(uint8_t*, int, int, int)> response_handler;
     std::thread main_thread;
     bool force_quit{false};
@@ -38,6 +39,8 @@ private:
 
     static int dpdk_rx_loop(void* arg);
     static int dpdk_tx_loop(void* arg);
+    static int dpdk_stat_loop(void*arg);
+
     void process_incoming_packets(dpdk_thread_info* rx_buf_info);
 
     int make_pkt_header(uint8_t *pkt, int payload_len,
@@ -59,7 +62,7 @@ public:
 
     void shutdown();
     void trigger_shutdown();
-
+    
     void register_resp_callback();
 
     ~Dpdk() {

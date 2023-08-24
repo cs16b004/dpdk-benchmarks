@@ -46,6 +46,7 @@ public:
     std::string dpdk_options_;
     std::vector<uint16_t> target_ids_;
     uint16_t src_id_;
+    uint16_t report_interval_ = 5000;
     CpuInfo cpu_info_;
 
     

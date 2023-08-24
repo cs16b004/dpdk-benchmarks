@@ -14,6 +14,6 @@ int main(int argc, char** argv) {
     signal(SIGINT, signal_handler);
     server->start_worker();
     server->shutdown();
-    delete server;
+    //delete server;
     return 0;
 }
