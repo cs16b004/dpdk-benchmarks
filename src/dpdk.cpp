@@ -7,6 +7,7 @@
 #include <rte_mbuf.h>
 #include <rte_prefetch.h>
 #include <rte_pmd_qdma.h>
+
 #include <string>
 #include <sstream>
 #include<iomanip>
@@ -32,19 +33,23 @@
 
 #define DPDK_COUNTER_DIFF 3*1000*1000
 
-const uint16_t DATA_OFFSET = sizeof(struct rte_ether_hdr) + sizeof(struct ipv4_hdr_t) + sizeof(struct udp_hdr_t);
+const uint16_t DATA_OFFSET = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
 const uint16_t IPV4_OFFSET =  sizeof(struct rte_ether_hdr);
-const uint16_t UDP_OFFSET = sizeof(struct rte_ether_hdr) + sizeof(struct ipv4_hdr_t);
+const uint16_t UDP_OFFSET = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr);
 
 static void inline swap_udp_addresses(struct rte_mbuf *pkt) {
     // Extract Ethernet header
     struct rte_ether_hdr *eth_hdr = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
 
+        struct rte_ether_addr temp = eth_hdr->s_addr;
+        eth_hdr->s_addr = eth_hdr->d_addr;
+        eth_hdr->d_addr = temp;
+
     // Extract IP header
-    struct rte_ipv4_hdr *ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
+    struct rte_ipv4_hdr *ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + IPV4_OFFSET);
 
     // Extract UDP header
-    struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
+    struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ip_hdr +  UDP_OFFSET);
 
     // Swap IP addresses
     uint32_t tmp_ip = ip_hdr->src_addr;
@@ -70,8 +75,12 @@ int Dpdk::dpdk_rx_loop(void* arg) {
         // Send the packets back if server;
         // calculate latency if generator;
         if(conf->host_type_ == Config::SERVER){
-            for(int i=0;i<num_rx;i++)
+            for(int i=0;i<num_rx;i++){
                 swap_udp_addresses(info->buf[i]);
+                rte_ether_hdr* eth_hdr = reinterpret_cast<rte_ether_hdr*>(info->buf[i]);
+                log_debug("Packet id %lld, mac: %s",info->id_counter_,mac_to_string((eth_hdr->d_addr).addr_bytes).c_str());
+            }
+
             num_tx = rte_eth_tx_burst(info->port_id_,info->queue_id_,info->buf,num_rx);
             info->snd_count_+=num_tx;
         }
@@ -97,11 +106,12 @@ int Dpdk::dpdk_stat_loop(void *arg){
     while(!info->dpdk_th->force_quit){
         usleep(conf->report_interval_ * 1000);// sleep for report interval seconds;
         //Print the stat table
-        tab << std::left << std::setw(20) << "Thread ID"
+        tab <<std::endl<< std::left << std::setw(20) << "Thread ID"
               << std::setw(20) << "num_rcv_pkts"
               << std::setw(20) << "num_snd_pkts" << std::endl;
         tab << std::setfill('-') << std::setw(70) << "" << std::endl;
 
+        uint64_t temp_last_snd_rcv;
         for(int i=0;i<info->dpdk_th->rx_threads_;i++){
             std::string thread_id = "rx-" + std::to_string(i);
 
@@ -114,8 +124,9 @@ int Dpdk::dpdk_stat_loop(void *arg){
             total_rcv_count += info->dpdk_th->thread_rx_info[i]->rcv_count_;
               
         }
+        temp_last_snd_rcv = total_rcv_count;
         total_rcv_count -= last_total_rcv;
-        last_total_rcv = total_rcv_count;
+        last_total_rcv =temp_last_snd_rcv;
         ;
 
         for(int i=0;i<info->dpdk_th->tx_threads_;i++){
@@ -129,10 +140,15 @@ int Dpdk::dpdk_stat_loop(void *arg){
             total_snd_count += info->dpdk_th->thread_tx_info[i]->snd_count_;
               
         }
+        temp_last_snd_rcv = total_snd_count;
         total_snd_count -= last_total_snd;
-        last_total_snd = total_snd_count;
-        log_info("\n %s\n Total Packets sent: %lld, Total received: %lld",tab.str().c_str(), total_rcv_count, total_snd_count);
+        last_total_snd = temp_last_snd_rcv;
+       // tab << std::setfill('-') << std::setw(70) << "" << std::endl;
+        log_info("\n %s\n Total Packets sent: %lld, Total received: %lld, rate %f",tab.str().c_str(), total_snd_count, total_rcv_count, total_snd_count*1.0/(conf->report_interval_/1000));
+        total_snd_count = 0;
+        
         tab.clear();
+        //tab<<std::setfill(' ')
     }
     return 0;
 }      
@@ -155,17 +171,17 @@ int Dpdk::dpdk_tx_loop(void* arg) {
 
             rte_ether_hdr* eth_hdr = reinterpret_cast<rte_ether_hdr*>(info->buf[i]);
             
-            log_debug("Packet id %lld is mac: %s",info->id_counter_,mac_to_string((eth_hdr->d_addr).addr_bytes).c_str());
+           // log_debug("Packet id %lld is mac: %s",info->id_counter_,mac_to_string((eth_hdr->d_addr).addr_bytes).c_str());
             uint8_t* pkt_arr = rte_pktmbuf_mtod(info->buf[i], uint8_t*);
             rte_memcpy(pkt_arr + DATA_OFFSET, &(info->id_counter_), sizeof(uint64_t));
             info->id_counter_++;
         }
-        log_debug("PKt Address while sending %p",&(info->buf[0]));
+       // log_debug("PKt Address while sending %p",&(info->buf[0]));
         ret = rte_eth_tx_burst(info->port_id_,info->queue_id_,info->buf,conf->burst_size);
-        if (unlikely(ret <= 0))
-            log_error("Tx couldn't send\n");   
+        // if (unlikely(ret <= 0))
+        //     log_error("Tx couldn't send\n");   
        
-        info->snd_count_+=ret;
+        info->snd_count_+= std::max(ret,0);
 
         rte_prefetch0(info->buf);
         //break;
@@ -184,8 +200,8 @@ void Dpdk::init(Config* config) {
 
     Config::CpuInfo cpu_info = config->get_cpu_info();
     const char* argv_str = config->get_dpdk_options();
-    tx_threads_ = config->num_rx_threads_;
-    rx_threads_ = config->num_tx_threads_;
+    tx_threads_ = config->num_tx_threads_;
+    rx_threads_ = config->num_rx_threads_;
    
     data_arr = new uint8_t[config->pkt_len];
     for(int i=0;i<config->pkt_len;i++){
@@ -262,7 +278,7 @@ void Dpdk::init_dpdk_main_thread(const char* argv_str) {
     uint16_t total_lcores = rte_lcore_count();
  
     log_info("Total Cores available: %d",total_lcores);
-    uint16_t rx_lcore_lim = (config_->host_type_ == Config::GENERATOR)? (rx_threads_+tx_threads_)/2: rx_threads_;
+    uint16_t rx_lcore_lim = rx_threads_;
     uint16_t tx_lcore_lim = (config_->host_type_ == Config::GENERATOR) ? rx_threads_ + tx_threads_: 0;
 
     uint8_t numa_id =  rte_eth_dev_socket_id(port_num_-1);
@@ -273,7 +289,7 @@ void Dpdk::init_dpdk_main_thread(const char* argv_str) {
     log_info("rx_core limit: %d tx_core limit: %d",rx_lcore_lim,tx_lcore_lim);
     for (lcore = numa_id * Config::get_config()->cpu_info_.core_per_numa + 1; lcore < rx_lcore_lim+1; lcore++) {
             
-            int retval = rte_eal_remote_launch(dpdk_rx_loop, this->thread_rx_info[lcore%rx_threads_], lcore );
+            int retval = rte_eal_remote_launch(dpdk_rx_loop, thread_rx_info[lcore%rx_threads_], lcore );
             if (retval < 0)
                 rte_exit(EXIT_FAILURE, "Couldn't launch core %d\n", lcore % total_lcores);
        
@@ -283,7 +299,7 @@ void Dpdk::init_dpdk_main_thread(const char* argv_str) {
     
     for (lcore = rx_lcore_lim+1; lcore < tx_lcore_lim+1; lcore++) {
             
-            int retval = rte_eal_remote_launch(dpdk_tx_loop, this->thread_tx_info[lcore%tx_threads_], lcore );
+            int retval = rte_eal_remote_launch(dpdk_tx_loop, thread_tx_info[lcore%tx_threads_], lcore );
             if (retval < 0)
                 rte_exit(EXIT_FAILURE, "Couldn't launch core %d\n", lcore % total_lcores);
         
@@ -504,7 +520,7 @@ int Dpdk::dpdk_thread_info::buf_alloc(struct rte_mempool* mbuf_pool) {
 
 void Dpdk::dpdk_thread_info::make_headers(){
     for(int i=0;i<Config::get_config()->burst_size;i++){
-        log_debug("Packet address for pkt %d while making header: %p",i,&buf[i]);
+        //log_debug("Packet address for pkt %d while making header: %p",i,&buf[i]);
         make_pkt_header(buf[i]);
     }
 }
@@ -531,12 +547,12 @@ void Dpdk::dpdk_thread_info::make_pkt_header(struct rte_mbuf* pkt){
     rte_ipv4_hdr* ipv4_hdr = reinterpret_cast<rte_ipv4_hdr*>(pkt_buf + pkt_offset);
     gen_ipv4_header(ipv4_hdr, src_addr.ip, (dest_addr.ip),conf->pkt_len);
 
-    pkt_offset += sizeof(ipv4_hdr_t);
+    pkt_offset += sizeof(rte_ipv4_hdr);
     rte_udp_hdr* udp_hdr = reinterpret_cast<rte_udp_hdr*>(pkt_buf + pkt_offset);
    
     gen_udp_header(udp_hdr, src_addr.port, dest_addr.port , conf->pkt_len);
 
-    pkt_offset += sizeof(udp_hdr_t);
+    pkt_offset += sizeof(rte_udp_hdr);
     pkt->pkt_len = conf->pkt_len;
     pkt->l2_len = sizeof(struct rte_ether_hdr);
     pkt->l3_len = sizeof(struct rte_ipv4_hdr);
