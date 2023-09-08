@@ -33,6 +33,14 @@
 
 #define DPDK_COUNTER_DIFF 3*1000*1000
 
+#define DEV_TX_OFFLOAD_VLAN_INSERT RTE_ETH_TX_OFFLOAD_VLAN_INSERT
+#define DEV_TX_OFFLOAD_IPV4_CKSUM RTE_ETH_TX_OFFLOAD_IPV4_CKSUM
+#define DEV_TX_OFFLOAD_UDP_CKSUM  RTE_ETH_TX_OFFLOAD_UDP_CKSUM
+#define DEV_TX_OFFLOAD_TCP_CKSUM  RTE_ETH_TX_OFFLOAD_TCP_CKSUM
+#define DEV_TX_OFFLOAD_SCTP_CKSUM RTE_ETH_TX_OFFLOAD_SCTP_CKSUM
+#define DEV_TX_OFFLOAD_TCP_TSO DEV_TX_OFFLOAD_TCP_CKSUM
+
+
 const uint16_t DATA_OFFSET = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
 const uint16_t IPV4_OFFSET =  sizeof(struct rte_ether_hdr);
 const uint16_t UDP_OFFSET = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr);
@@ -41,9 +49,9 @@ static void inline swap_udp_addresses(struct rte_mbuf *pkt) {
     // Extract Ethernet header
     struct rte_ether_hdr *eth_hdr = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
 
-        struct rte_ether_addr temp = eth_hdr->s_addr;
-        eth_hdr->s_addr = eth_hdr->d_addr;
-        eth_hdr->d_addr = temp;
+        struct rte_ether_addr temp = eth_hdr->src_addr;
+        eth_hdr->src_addr = eth_hdr->dst_addr;
+        eth_hdr->dst_addr = temp;
 
     // Extract IP header
     struct rte_ipv4_hdr *ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + IPV4_OFFSET);
@@ -78,7 +86,7 @@ int Dpdk::dpdk_rx_loop(void* arg) {
             for(int i=0;i<num_rx;i++){
                 swap_udp_addresses(info->buf[i]);
                 rte_ether_hdr* eth_hdr = reinterpret_cast<rte_ether_hdr*>(info->buf[i]);
-                log_debug("Packet id %lld, mac: %s",info->id_counter_,mac_to_string((eth_hdr->d_addr).addr_bytes).c_str());
+                log_debug("Packet id %lld, mac: %s",info->id_counter_,mac_to_string((eth_hdr->dst_addr).addr_bytes).c_str());
             }
 
             num_tx = rte_eth_tx_burst(info->port_id_,info->queue_id_,info->buf,num_rx);
@@ -143,7 +151,7 @@ int Dpdk::dpdk_stat_loop(void *arg){
         temp_last_snd_rcv = total_snd_count;
         total_snd_count -= last_total_snd;
         last_total_snd = temp_last_snd_rcv;
-       // tab << std::setfill('-') << std::setw(70) << "" << std::endl;
+
         log_info("\n %s\n Total Packets sent: %lld, Total received: %lld, rate %f",tab.str().c_str(), total_snd_count, total_rcv_count, total_snd_count*1.0/(conf->report_interval_/1000));
         total_snd_count = 0;
         
@@ -171,7 +179,7 @@ int Dpdk::dpdk_tx_loop(void* arg) {
 
             rte_ether_hdr* eth_hdr = reinterpret_cast<rte_ether_hdr*>(info->buf[i]);
             
-           // log_debug("Packet id %lld is mac: %s",info->id_counter_,mac_to_string((eth_hdr->d_addr).addr_bytes).c_str());
+           // log_debug("Packet id %lld is mac: %s",info->id_counter_,mac_to_string((eth_hdr->dst_addr).addr_bytes).c_str());
             uint8_t* pkt_arr = rte_pktmbuf_mtod(info->buf[i], uint8_t*);
             rte_memcpy(pkt_arr + DATA_OFFSET, &(info->id_counter_), sizeof(uint64_t));
             info->id_counter_++;
@@ -321,7 +329,7 @@ void Dpdk::addr_config(std::vector<Config::NetworkInfo> net_info) {
 }
 
 int Dpdk::port_init(uint16_t port_id) {
-    struct rte_eth_conf port_conf;
+  
     uint16_t nb_rxd = DPDK_RX_DESC_SIZE;
     uint16_t nb_txd = DPDK_TX_DESC_SIZE;
     int retval;
@@ -329,13 +337,10 @@ int Dpdk::port_init(uint16_t port_id) {
     struct rte_eth_dev_info dev_info;
     struct rte_eth_txconf txconf;
     struct rte_eth_rxconf rxconf;
-    struct rte_device *dev;
+    struct rte_eth_dev_info dev;
 
-    dev = rte_eth_devices[port_id].device;
-    if (dev == nullptr) {
-        log_error("Port %d is already removed", port_id);
-        return -1;
-    }
+    rte_eth_dev_info_get(port_id, &dev);
+    
 
     if (!rte_eth_dev_is_valid_port(port_id))
         return -1;
@@ -347,15 +352,12 @@ int Dpdk::port_init(uint16_t port_id) {
         return retval;
     }
 
-    memset(&port_conf, 0x0, sizeof(struct rte_eth_conf));
+    //memset(&port_conf, 0x0, sizeof(struct rte_eth_conf));
     memset(&txconf, 0x0, sizeof(struct rte_eth_txconf));
     memset(&rxconf, 0x0, sizeof(struct rte_eth_rxconf));
 
 
-     port_conf = {
-		.rxmode = {
-			.split_hdr_size = 0,
-		},
+    struct rte_eth_conf port_conf = {
 		.txmode = {
 			.offloads =
 				DEV_TX_OFFLOAD_VLAN_INSERT |
@@ -368,8 +370,7 @@ int Dpdk::port_init(uint16_t port_id) {
 	};
     
     port_conf.txmode.offloads &= dev_info.tx_offload_capa;
-
-    rxconf = dev_info.default_rxconf;
+    memcpy((void*)(&rxconf) , (void*)&(dev_info.default_rxconf),sizeof(struct rte_eth_rxconf));
 	rxconf.offloads = port_conf.rxmode.offloads;
    
 
@@ -443,12 +444,9 @@ int Dpdk::port_close(uint16_t port_id) {
 }
 
 int Dpdk::port_reset(uint16_t port_id) {
-    struct rte_device* dev = rte_eth_devices[port_id].device;
-    if (dev == nullptr) {
-        log_error("Port %d is already removed", port_id);
-        return -1;
-    }
+     struct rte_eth_dev_info dev;
 
+    rte_eth_dev_info_get(port_id, &dev);
     int retval = port_close(port_id);
     if (retval < 0) {
         log_error("Error: Failed to close device for port: %d", port_id);
@@ -475,19 +473,16 @@ void Dpdk::shutdown() {
     rte_eal_mp_wait_lcore();
 
     for (int port_id = 0; port_id < port_num_; port_id++) {
-        struct rte_device *dev = rte_eth_devices[port_id].device;
-        if (dev == nullptr) {
-            log_error("Port %d is already removed", port_id);
-            continue;
-        }
-
+        struct rte_eth_dev_info dev;
+        rte_eth_dev_info_get(port_id,&dev);
+       
         rte_eth_dev_stop(port_id);
         rte_eth_dev_close(port_id);
-        int ret = rte_dev_remove(dev);
-        if (ret < 0)
-            log_error("Failed to remove device on port: %d", port_id);
+        // int ret = rte_dev_remove(dev);
+        // if (ret < 0)
+        //     log_error("Failed to remove device on port: %d", port_id);
 
-    }
+         }
 
     rte_eal_cleanup();
 }
@@ -531,7 +526,7 @@ void Dpdk::dpdk_thread_info::make_pkt_header(struct rte_mbuf* pkt){
    
      pkt->data_len = conf->pkt_len;
     pkt->next = NULL;
-    pkt->ol_flags = PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
+    pkt->ol_flags = RTE_MBUF_F_TX_IPV4 | RTE_MBUF_F_TX_IP_CKSUM | RTE_MBUF_F_TX_UDP_CKSUM;
     /* Initialize Ethernet header. */
      uint8_t* pkt_buf = rte_pktmbuf_mtod(pkt, uint8_t*);
 
@@ -541,7 +536,7 @@ void Dpdk::dpdk_thread_info::make_pkt_header(struct rte_mbuf* pkt){
     rte_ether_hdr* eth_hdr = reinterpret_cast<rte_ether_hdr*>(pkt_buf);
     gen_eth_header(eth_hdr, src_addr.mac, dest_addr.mac);
 
-    log_debug("Making pkt ether addr %s at address %p",mac_to_string(eth_hdr->d_addr.addr_bytes).c_str(), eth_hdr);
+    log_debug("Making pkt ether addr %s at address %p",mac_to_string(eth_hdr->dst_addr.addr_bytes).c_str(), eth_hdr);
 
     pkt_offset += sizeof(rte_ether_hdr);
     rte_ipv4_hdr* ipv4_hdr = reinterpret_cast<rte_ipv4_hdr*>(pkt_buf + pkt_offset);
