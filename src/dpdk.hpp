@@ -32,11 +32,11 @@ private:
     void addr_config(std::vector<Config::NetworkInfo> net_info);
     void init_dpdk_main_thread(const char* argv_str);
     void init_dpdk_echo(const char* argv_str);
-
+    
     int port_init(uint16_t port_id);
     int port_reset(uint16_t port_id);
     int port_close(uint16_t port_id);
-
+    void install_flow_rule(size_t phy_port);
     static int dpdk_rx_loop(void* arg);
     static int dpdk_tx_loop(void* arg);
     static int dpdk_stat_loop(void*arg);

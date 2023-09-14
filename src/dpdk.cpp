@@ -39,7 +39,8 @@
 #define DEV_TX_OFFLOAD_TCP_CKSUM  RTE_ETH_TX_OFFLOAD_TCP_CKSUM
 #define DEV_TX_OFFLOAD_SCTP_CKSUM RTE_ETH_TX_OFFLOAD_SCTP_CKSUM
 #define DEV_TX_OFFLOAD_TCP_TSO DEV_TX_OFFLOAD_TCP_CKSUM
-
+#define MAX_PATTERN_NUM		3
+#define MAX_ACTION_NUM		2
 
 const uint16_t DATA_OFFSET = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
 const uint16_t IPV4_OFFSET =  sizeof(struct rte_ether_hdr);
@@ -47,7 +48,7 @@ const uint16_t UDP_OFFSET = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv
 
 static void inline swap_udp_addresses(struct rte_mbuf *pkt) {
     // Extract Ethernet header
-    struct rte_ether_hdr *eth_hdr = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
+        struct rte_ether_hdr *eth_hdr = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
 
         struct rte_ether_addr temp = eth_hdr->src_addr;
         eth_hdr->src_addr = eth_hdr->dst_addr;
@@ -77,20 +78,29 @@ int Dpdk::dpdk_rx_loop(void* arg) {
    const uint16_t burst_size = conf->burst_size;
    log_info("Launching rx thread %d, on lcore: %d, id counter %d on cpu %d",info->thread_id_, rte_lcore_id(),info->id_counter_,sched_getcpu());
     while(!info->dpdk_th->force_quit){
-        ;
+        
         num_rx  = rte_eth_rx_burst(info->port_id_, info->queue_id_, info->buf,burst_size);
+
+        //log_debug("Number receievd %d",num_rx);
+        if(num_rx > 0 ){
+
         info->rcv_count_+=num_rx;
         // Send the packets back if server;
         // calculate latency if generator;
         if(conf->host_type_ == Config::SERVER){
             for(int i=0;i<num_rx;i++){
                 swap_udp_addresses(info->buf[i]);
+                uint8_t* pkt_ptr = rte_pktmbuf_mtod(info->buf[i],uint8_t*);
                 rte_ether_hdr* eth_hdr = reinterpret_cast<rte_ether_hdr*>(info->buf[i]);
-                log_debug("Packet id %lld, mac: %s",info->id_counter_,mac_to_string((eth_hdr->dst_addr).addr_bytes).c_str());
+                rte_ipv4_hdr* ipv4_hdr = reinterpret_cast<rte_ipv4_hdr*>(pkt_ptr+ sizeof(rte_ether_hdr));
+                log_debug("Sending received packets, mac: %s, dst_ip: %s",
+                        mac_to_string((eth_hdr->dst_addr).addr_bytes).c_str(), 
+                        ipv4_to_string(ipv4_hdr->dst_addr).c_str());
             }
 
             num_tx = rte_eth_tx_burst(info->port_id_,info->queue_id_,info->buf,num_rx);
             info->snd_count_+=num_tx;
+        }
         }
 
     }
@@ -109,8 +119,10 @@ int Dpdk::dpdk_stat_loop(void *arg){
      Config* conf = Config::get_config();
      uint64_t last_rcv_count[conf->num_rx_threads_] = {0};
      uint64_t last_snd_count[conf->num_tx_threads_] = {0};
+     uint64_t current_rcv_count[conf->num_rx_threads_] = {0};
+     uint64_t current_send_count[conf->num_tx_threads_] = {0};
     std::stringstream tab;
-    
+    uint64_t temp_last_snd_rcv=0;
     while(!info->dpdk_th->force_quit){
         usleep(conf->report_interval_ * 1000);// sleep for report interval seconds;
         //Print the stat table
@@ -118,43 +130,60 @@ int Dpdk::dpdk_stat_loop(void *arg){
               << std::setw(20) << "num_rcv_pkts"
               << std::setw(20) << "num_snd_pkts" << std::endl;
         tab << std::setfill('-') << std::setw(70) << "" << std::endl;
-
-        uint64_t temp_last_snd_rcv;
         for(int i=0;i<info->dpdk_th->rx_threads_;i++){
-            std::string thread_id = "rx-" + std::to_string(i);
-
-            tab << std::setfill(' ') << std::left << std::setw(20) << thread_id
-              << std::setw(20) << info->dpdk_th->thread_rx_info[i]->rcv_count_ - last_rcv_count[i]
-              << std::setw(20) << info->dpdk_th->thread_rx_info[i]->snd_count_ << std::endl;
-            
-            last_rcv_count[i] = info->dpdk_th->thread_rx_info[i]->rcv_count_;
-            
-            total_rcv_count += info->dpdk_th->thread_rx_info[i]->rcv_count_;
-              
+                current_rcv_count[i] = info->dpdk_th->thread_rx_info[i]->rcv_count_;
         }
-        temp_last_snd_rcv = total_rcv_count;
-        total_rcv_count -= last_total_rcv;
-        last_total_rcv =temp_last_snd_rcv;
-        ;
-
         for(int i=0;i<info->dpdk_th->tx_threads_;i++){
-            std::string thread_id = "tx-" + std::to_string(i);
-
-            tab << std::setfill(' ') << std::left << std::setw(20) << thread_id
-              << std::setw(20) << 0
-              << std::setw(20) << info->dpdk_th->thread_tx_info[i]->snd_count_ - last_snd_count[i] << std::endl;
-            
-            last_snd_count[i] = info->dpdk_th->thread_tx_info[i]->snd_count_ ;
-            total_snd_count += info->dpdk_th->thread_tx_info[i]->snd_count_;
-              
+                current_send_count[i] = info->dpdk_th->thread_tx_info[i]->snd_count_;
         }
-        temp_last_snd_rcv = total_snd_count;
-        total_snd_count -= last_total_snd;
-        last_total_snd = temp_last_snd_rcv;
-
-        log_info("\n %s\n Total Packets sent: %lld, Total received: %lld, rate %f",tab.str().c_str(), total_snd_count, total_rcv_count, total_snd_count*1.0/(conf->report_interval_/1000));
-        total_snd_count = 0;
         
+        
+        if(conf->host_type_ == Config::GENERATOR){
+            
+            for(int i=0;i<info->dpdk_th->rx_threads_;i++){
+                std::string thread_id = "rx-" + std::to_string(i);
+
+                tab << std::setfill(' ') << std::left << std::setw(20) << thread_id
+                    << std::setw(20) << current_rcv_count[i] - last_rcv_count[i]
+                    << std::setw(20) << info->dpdk_th->thread_rx_info[i]->snd_count_ << std::endl;
+            
+               
+                total_rcv_count += current_rcv_count[i]-last_rcv_count[i];
+                last_rcv_count[i] = current_rcv_count[i];
+              
+            }
+            
+            for(int i=0;i<info->dpdk_th->tx_threads_;i++){
+                std::string thread_id = "tx-" + std::to_string(i);
+
+                tab << std::setfill(' ') << std::left << std::setw(20) << thread_id
+                    << std::setw(20) << 0
+                    << std::setw(20) << current_send_count[i] - last_snd_count[i] << std::endl;
+            
+                total_snd_count+= current_send_count[i] - last_snd_count[i];
+                last_snd_count[i] = current_send_count[i];
+            }
+        }else{
+            for(int i=0;i<info->dpdk_th->rx_threads_;i++){
+                std::string thread_id = "rx-" + std::to_string(i);
+
+                tab << std::setfill(' ') << std::left << std::setw(20) << thread_id
+                    << std::setw(20) << current_rcv_count[i] - last_rcv_count[i]
+                    << std::setw(20) << current_send_count[i] - last_snd_count[i] << std::endl;
+
+               
+                total_snd_count += current_send_count[i] - last_snd_count[i];
+                total_rcv_count += current_rcv_count[i] - last_rcv_count[i];
+                last_rcv_count[i] =  current_rcv_count[i] ;
+                last_snd_count[i] = current_send_count[i];
+              
+            }
+            
+        }
+        //log_info("%s",tab.str().c_str());
+        log_info("Total Packets sent: %lld, Total received: %lld, rate %f", total_snd_count, total_rcv_count, total_snd_count*1.0/(conf->report_interval_/1000));
+        total_snd_count = 0;
+        total_rcv_count = 0;
         tab.clear();
         //tab<<std::setfill(' ')
     }
@@ -174,6 +203,7 @@ int Dpdk::dpdk_tx_loop(void* arg) {
     while(!info->dpdk_th->force_quit){
         
         rte_prefetch0(info->buf);
+        sleep(1);
         for(int i=0;i<burst_size;i++){
 
 
@@ -186,8 +216,8 @@ int Dpdk::dpdk_tx_loop(void* arg) {
         }
        // log_debug("PKt Address while sending %p",&(info->buf[0]));
         ret = rte_eth_tx_burst(info->port_id_,info->queue_id_,info->buf,conf->burst_size);
-        // if (unlikely(ret <= 0))
-        //     log_error("Tx couldn't send\n");   
+        if (unlikely(ret <= 0))
+            log_error("Tx couldn't send\n");   
        
         info->snd_count_+= std::max(ret,0);
 
@@ -213,7 +243,7 @@ void Dpdk::init(Config* config) {
    
     data_arr = new uint8_t[config->pkt_len];
     for(int i=0;i<config->pkt_len;i++){
-        data_arr[i] = 0x0;
+        data_arr[i] = 0x11;
     }
     main_thread = std::thread([this, argv_str](){
         this->init_dpdk_main_thread(argv_str);
@@ -289,12 +319,13 @@ void Dpdk::init_dpdk_main_thread(const char* argv_str) {
     uint16_t rx_lcore_lim = rx_threads_;
     uint16_t tx_lcore_lim = (config_->host_type_ == Config::GENERATOR) ? rx_threads_ + tx_threads_: 0;
 
-    uint8_t numa_id =  rte_eth_dev_socket_id(port_num_-1);
+    uint8_t numa_id =  Config::get_config()->cpu_info_.numa;
     // Add core per numa so that threads are scheduled on rigt lcores
     uint16_t lcore;
     rx_lcore_lim += numa_id * Config::get_config()->cpu_info_.core_per_numa;
     tx_lcore_lim += numa_id * Config::get_config()->cpu_info_.core_per_numa;
     log_info("rx_core limit: %d tx_core limit: %d",rx_lcore_lim,tx_lcore_lim);
+
     for (lcore = numa_id * Config::get_config()->cpu_info_.core_per_numa + 1; lcore < rx_lcore_lim+1; lcore++) {
             
             int retval = rte_eal_remote_launch(dpdk_rx_loop, thread_rx_info[lcore%rx_threads_], lcore );
@@ -313,9 +344,16 @@ void Dpdk::init_dpdk_main_thread(const char* argv_str) {
         
     }
     // Launch stat thread
+    //#ifndef LOG_LEVEL_AS_DEBUG
+
+    if(Config::get_config()->host_type_ == Config::SERVER){
+        thread_tx_info = thread_rx_info;
+        tx_threads_ = rx_threads_;
+    }
     int retval = rte_eal_remote_launch(dpdk_stat_loop, this->thread_stat_info, lcore);
             if (retval < 0)
                 rte_exit(EXIT_FAILURE, "Couldn't launch core %d\n", lcore % total_lcores);
+    //#endif
     
 }
 
@@ -434,7 +472,9 @@ int Dpdk::port_init(uint16_t port_id) {
         thread_tx_info[i]->init(this, i, port_id, i, i*DPDK_COUNTER_DIFF);
         thread_tx_info[i]->buf_alloc(tx_mbuf_pool[i]);
     }
+
     thread_stat_info->init(this,0,port_id,0,0);
+    install_flow_rule(port_id);
     return 0;
 }
 
@@ -548,10 +588,11 @@ void Dpdk::dpdk_thread_info::make_pkt_header(struct rte_mbuf* pkt){
     gen_udp_header(udp_hdr, src_addr.port, dest_addr.port , conf->pkt_len);
 
     pkt_offset += sizeof(rte_udp_hdr);
-    pkt->pkt_len = conf->pkt_len;
+    pkt->pkt_len = conf->pkt_len + sizeof(rte_ether_hdr) + sizeof(struct rte_ipv4_hdr)+ sizeof(struct rte_udp_hdr);
     pkt->l2_len = sizeof(struct rte_ether_hdr);
     pkt->l3_len = sizeof(struct rte_ipv4_hdr);
     pkt->l4_len = sizeof(struct rte_udp_hdr);
+    pkt->data_len = conf->pkt_len + sizeof(rte_ether_hdr) + sizeof(struct rte_ipv4_hdr)+ sizeof(struct rte_udp_hdr);
     pkt->nb_segs = 1;
     rte_memcpy(pkt_buf + pkt_offset, dpdk_th->data_arr, conf->pkt_len);
 
@@ -607,3 +648,108 @@ void Dpdk::dpdk_thread_info::init(Dpdk* th, uint16_t th_id, uint8_t p_id,
                     buf = new struct rte_mbuf*[Config::get_config()->burst_size];
 
                   }
+void Dpdk::install_flow_rule(size_t phy_port){
+    
+  
+   struct rte_flow_attr attr;
+	struct rte_flow_item pattern[MAX_PATTERN_NUM];
+	struct rte_flow_action action[MAX_ACTION_NUM];
+	struct rte_flow *flow = NULL;
+	struct rte_flow_action_queue queue = { .index = 0 };
+	struct rte_flow_item_ipv4 ip_spec;
+	struct rte_flow_item_ipv4 ip_mask;
+    struct rte_flow_item_eth eth_spec;
+    struct rte_flow_item_eth eth_mask;
+    struct rte_flow_item_udp udp_spec;
+    struct rte_flow_item_udp udp_mask;
+
+    struct rte_flow_error error;
+	int res;
+    Config* conf = Config::get_config();
+    NetAddress src_addr = get_net_from_id(conf->src_id_);
+
+	memset(pattern, 0, sizeof(pattern));
+	memset(action, 0, sizeof(action));
+
+	/*
+	 * set the rule attribute.
+	 * in this case only ingress packets will be checked.
+	 */
+	memset(&attr, 0, sizeof(struct rte_flow_attr));
+    attr.priority =1 ;
+	attr.ingress = 1;
+
+	/*
+	 * create the action sequence.
+	 * one action only,  move packet to queue
+	 */
+	action[0].type = RTE_FLOW_ACTION_TYPE_QUEUE;
+	action[0].conf = &queue;
+	action[1].type = RTE_FLOW_ACTION_TYPE_END;
+
+	/*
+	 * set the first level of the pattern (ETH).
+	 * since in this example we just want to get the
+	 * ipv4 we set this level to allow all.
+	 */
+	pattern[0].type = RTE_FLOW_ITEM_TYPE_ETH;
+    memset(&eth_spec, 0, sizeof(struct rte_flow_item_eth));
+    memset(&eth_mask, 0, sizeof(struct rte_flow_item_eth));
+    eth_spec.type = RTE_BE16(RTE_ETHER_TYPE_IPV4);
+    eth_mask.type = RTE_BE16(0xffff);
+    pattern[0].type = RTE_FLOW_ITEM_TYPE_ETH;
+    pattern[0].spec = &eth_spec;
+    pattern[0].mask = &eth_mask;
+
+	/*
+	 * setting the second level of the pattern (IP).
+	 * in this example this is the level we care about
+	 * so we set it according to the parameters.
+	 */
+	memset(&ip_spec, 0, sizeof(struct rte_flow_item_ipv4));
+	memset(&ip_mask, 0, sizeof(struct rte_flow_item_ipv4));
+	ip_spec.hdr.dst_addr = src_addr.ip;
+
+     ip_mask.hdr.dst_addr = RTE_BE32(0xffffffff);
+    //ip_spec.hdr.src_addr = 0;
+    //ip_mask.hdr.src_addr = RTE_BE32(0);
+
+    log_info("IP Address to be queued %s",ipv4_to_string(ip_spec.hdr.dst_addr).c_str());
+
+	//ip_mask.hdr.dst_addr = 
+	
+	pattern[1].type = RTE_FLOW_ITEM_TYPE_IPV4;
+	pattern[1].spec = &ip_spec;
+	pattern[1].mask = &ip_mask;
+
+	
+
+    memset(&udp_mask, 0, sizeof(struct rte_flow_item_udp));
+    memset(&udp_spec, 0, sizeof(struct rte_flow_item_udp));
+    udp_spec.hdr.dst_port = RTE_BE16(8501);
+    udp_mask.hdr.dst_port = RTE_BE16(0xffff);
+    /* TODO: Change this to support leader change */
+    udp_spec.hdr.src_port = 0;
+    udp_mask.hdr.src_port = RTE_BE16(0);
+    udp_mask.hdr.dgram_len = RTE_BE16(0);
+    pattern[2].type = RTE_FLOW_ITEM_TYPE_UDP;
+    pattern[2].spec = &udp_spec;
+    pattern[2].mask = &udp_mask;
+    /* the final level must be always type end */
+	pattern[2].type = RTE_FLOW_ITEM_TYPE_END;
+	res = rte_flow_validate(phy_port, &attr, pattern, action, &error);
+    
+
+	if (!res){
+		flow = rte_flow_create(phy_port, &attr, pattern, action, &error);
+        log_info("Flow Rule Added for IP Address : %s",ipv4_to_string(src_addr.ip).c_str());
+        // int ret = rte_flow_isolate(phy_port, 1,&error);
+   
+        //  if (!ret) 
+        //     Log_error("Failed to enable flow isolation for port %d\n, message: %s", phy_port,error.message);
+        //  else
+        //     log_info("Flow isolation enabled for port %d\n", phy_port);
+    }else{
+        log_error("Failed to create flow rule: %s\n", error.message);
+    }
+}
