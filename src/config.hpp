@@ -39,6 +39,7 @@ public:
     static Config* config_s;
     uint64_t duration = 100; //duration in seconds;
     uint16_t burst_size;
+    uint16_t rx_burst_size;
     uint16_t pkt_len;
     std::string host_name_;
     std::string name_;

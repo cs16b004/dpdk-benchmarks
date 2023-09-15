@@ -77,11 +77,11 @@ static uint32_t ipv4_from_str(const char* ip) {
 }
 
 static std::string ipv4_to_string(uint32_t ipv4_addr) {
-  char str[INET_ADDRSTRLEN];
+  char str[128];
   const char* ret = inet_ntop(AF_INET, &ipv4_addr, str, sizeof(str));
-  rt_assert(ret == str, "inet_ntop failed");
+  //rt_assert(ret !=nullptr, "inet_ntop failed");
   str[INET_ADDRSTRLEN - 1] = 0;  // Null-terminate
-  return str;
+  return std::string(str);
 }
 
 struct eth_hdr_t {

@@ -75,33 +75,47 @@ int Dpdk::dpdk_rx_loop(void* arg) {
    dpdk_thread_info* info = (dpdk_thread_info*) arg ;
    uint16_t num_rx=0,num_tx=0;
     Config* conf = Config::get_config();
-   const uint16_t burst_size = conf->burst_size;
+   const uint16_t burst_size = conf->rx_burst_size;
    log_info("Launching rx thread %d, on lcore: %d, id counter %d on cpu %d",info->thread_id_, rte_lcore_id(),info->id_counter_,sched_getcpu());
     while(!info->dpdk_th->force_quit){
-        
+        rte_prefetch0(info->buf);
         num_rx  = rte_eth_rx_burst(info->port_id_, info->queue_id_, info->buf,burst_size);
-
+        if(num_rx > burst_size){
+            log_info("NUM RX GREATER THAN BURST SIZE: %d,burst %d",num_rx,burst_size);
+        }
         //log_debug("Number receievd %d",num_rx);
         if(num_rx > 0 ){
 
         info->rcv_count_+=num_rx;
         // Send the packets back if server;
         // calculate latency if generator;
-        if(conf->host_type_ == Config::SERVER){
-            for(int i=0;i<num_rx;i++){
-                swap_udp_addresses(info->buf[i]);
-                uint8_t* pkt_ptr = rte_pktmbuf_mtod(info->buf[i],uint8_t*);
-                rte_ether_hdr* eth_hdr = reinterpret_cast<rte_ether_hdr*>(info->buf[i]);
-                rte_ipv4_hdr* ipv4_hdr = reinterpret_cast<rte_ipv4_hdr*>(pkt_ptr+ sizeof(rte_ether_hdr));
-                log_debug("Sending received packets, mac: %s, dst_ip: %s",
-                        mac_to_string((eth_hdr->dst_addr).addr_bytes).c_str(), 
-                        ipv4_to_string(ipv4_hdr->dst_addr).c_str());
+            if(conf->host_type_ == Config::SERVER){
+                for(int i=0;i<num_rx;i++){
+                    swap_udp_addresses(info->buf[i]);
+                    
+                    #ifdef LOG_LEVEL_AS_DEBUG
+                    uint8_t* pkt_ptr = rte_pktmbuf_mtod(info->buf[i],uint8_t*);
+                    rte_ether_hdr* eth_hdr = reinterpret_cast<rte_ether_hdr*>(info->buf[i]);
+                    rte_ipv4_hdr* ipv4_hdr = reinterpret_cast<rte_ipv4_hdr*>(pkt_ptr+ sizeof(rte_ether_hdr));
+                    log_debug("Sending received packets, mac: %s, dst_ip: %s",
+                    mac_to_string((eth_hdr->dst_addr).addr_bytes).c_str(), 
+                    ipv4_to_string(ipv4_hdr->dst_addr).c_str());
+                    #endif
             }
 
             num_tx = rte_eth_tx_burst(info->port_id_,info->queue_id_,info->buf,num_rx);
             info->snd_count_+=num_tx;
+            for (uint16_t j = num_tx; j < num_rx; j++) {
+                rte_pktmbuf_free(info->buf[j]);
+            }
+        }else{
+             for(int i=0;i<num_rx;i++){
+
+                rte_pktmbuf_free(info->buf[i]);
+             }
         }
         }
+        rte_prefetch0(info->buf);
 
     }
    return 0;
@@ -110,26 +124,18 @@ int Dpdk::dpdk_rx_loop(void* arg) {
 int Dpdk::dpdk_stat_loop(void *arg){
     dpdk_thread_info* info = (dpdk_thread_info*) arg ;
     log_info("Launching stat thread %d, on lcore: %d, on cpu %d",info->thread_id_, rte_lcore_id(), sched_getcpu());
-
-    uint64_t total_rcv_count=0;
-    uint64_t total_snd_count=0;
-    uint64_t last_total_rcv=0;
-    uint64_t last_total_snd=0;
     
      Config* conf = Config::get_config();
      uint64_t last_rcv_count[conf->num_rx_threads_] = {0};
      uint64_t last_snd_count[conf->num_tx_threads_] = {0};
      uint64_t current_rcv_count[conf->num_rx_threads_] = {0};
      uint64_t current_send_count[conf->num_tx_threads_] = {0};
-    std::stringstream tab;
-    uint64_t temp_last_snd_rcv=0;
+     uint64_t total_rcv_count=0;
+     uint64_t total_snd_count=0;
+
     while(!info->dpdk_th->force_quit){
         usleep(conf->report_interval_ * 1000);// sleep for report interval seconds;
         //Print the stat table
-        tab <<std::endl<< std::left << std::setw(20) << "Thread ID"
-              << std::setw(20) << "num_rcv_pkts"
-              << std::setw(20) << "num_snd_pkts" << std::endl;
-        tab << std::setfill('-') << std::setw(70) << "" << std::endl;
         for(int i=0;i<info->dpdk_th->rx_threads_;i++){
                 current_rcv_count[i] = info->dpdk_th->thread_rx_info[i]->rcv_count_;
         }
@@ -141,12 +147,6 @@ int Dpdk::dpdk_stat_loop(void *arg){
         if(conf->host_type_ == Config::GENERATOR){
             
             for(int i=0;i<info->dpdk_th->rx_threads_;i++){
-                std::string thread_id = "rx-" + std::to_string(i);
-
-                tab << std::setfill(' ') << std::left << std::setw(20) << thread_id
-                    << std::setw(20) << current_rcv_count[i] - last_rcv_count[i]
-                    << std::setw(20) << info->dpdk_th->thread_rx_info[i]->snd_count_ << std::endl;
-            
                
                 total_rcv_count += current_rcv_count[i]-last_rcv_count[i];
                 last_rcv_count[i] = current_rcv_count[i];
@@ -154,23 +154,11 @@ int Dpdk::dpdk_stat_loop(void *arg){
             }
             
             for(int i=0;i<info->dpdk_th->tx_threads_;i++){
-                std::string thread_id = "tx-" + std::to_string(i);
-
-                tab << std::setfill(' ') << std::left << std::setw(20) << thread_id
-                    << std::setw(20) << 0
-                    << std::setw(20) << current_send_count[i] - last_snd_count[i] << std::endl;
-            
                 total_snd_count+= current_send_count[i] - last_snd_count[i];
                 last_snd_count[i] = current_send_count[i];
             }
         }else{
             for(int i=0;i<info->dpdk_th->rx_threads_;i++){
-                std::string thread_id = "rx-" + std::to_string(i);
-
-                tab << std::setfill(' ') << std::left << std::setw(20) << thread_id
-                    << std::setw(20) << current_rcv_count[i] - last_rcv_count[i]
-                    << std::setw(20) << current_send_count[i] - last_snd_count[i] << std::endl;
-
                
                 total_snd_count += current_send_count[i] - last_snd_count[i];
                 total_rcv_count += current_rcv_count[i] - last_rcv_count[i];
@@ -180,12 +168,12 @@ int Dpdk::dpdk_stat_loop(void *arg){
             }
             
         }
-        //log_info("%s",tab.str().c_str());
+     
         log_info("Total Packets sent: %lld, Total received: %lld, rate %f", total_snd_count, total_rcv_count, total_snd_count*1.0/(conf->report_interval_/1000));
         total_snd_count = 0;
         total_rcv_count = 0;
-        tab.clear();
-        //tab<<std::setfill(' ')
+   
+        
     }
     return 0;
 }      
@@ -199,11 +187,13 @@ int Dpdk::dpdk_tx_loop(void* arg) {
     
    Config* conf = Config::get_config();
    int ret;
+   int tx_count;
     log_info("Launching tx thread %d, on lcore: %d, id counter %d, burst_size %d, on cpu %d",info->thread_id_, rte_lcore_id(),info->id_counter_,burst_size, sched_getcpu());
     while(!info->dpdk_th->force_quit){
         
-        rte_prefetch0(info->buf);
-        sleep(1);
+        //rte_prefetch0(info->buf);
+        //if(rand() % 10 == 0)
+        //    usleep(1);
         for(int i=0;i<burst_size;i++){
 
 
@@ -215,13 +205,15 @@ int Dpdk::dpdk_tx_loop(void* arg) {
             info->id_counter_++;
         }
        // log_debug("PKt Address while sending %p",&(info->buf[0]));
-        ret = rte_eth_tx_burst(info->port_id_,info->queue_id_,info->buf,conf->burst_size);
-        if (unlikely(ret <= 0))
+        tx_count = rte_eth_tx_burst(info->port_id_,info->queue_id_,info->buf,conf->burst_size);
+        if (unlikely(tx_count < 0))
             log_error("Tx couldn't send\n");   
-       
-        info->snd_count_+= std::max(ret,0);
+        for (uint16_t j = tx_count; j < conf->burst_size; j++) {
+            rte_pktmbuf_free(info->buf[j]);
+        }
+        info->snd_count_+= std::max(tx_count,0);
 
-        rte_prefetch0(info->buf);
+        //rte_prefetch0(info->buf);
         //break;
     }
     log_info("Thread %d sent %d pkts", info->thread_id_ ,info->snd_count_);
