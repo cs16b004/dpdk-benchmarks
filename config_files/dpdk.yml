@@ -2,9 +2,9 @@ dpdk:
   # the ratio between number of rx threads to tx
   # strictly it should be greater than zero but
   # it is recommended to be between 1 and 2
-  rx_threads: 5
-  tx_threads: 5
-  pkt_size: 64
+  rx_threads: 4
+  tx_threads: 4
+  pkt_size: 1024
   pkt_burst_size: 64
   rx_burst_size: 32
   report_interval: 1000 #report interval in milliseconds
